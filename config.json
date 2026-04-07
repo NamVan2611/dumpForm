@@ -1,0 +1,6 @@
+{
+  "headless": true,
+  "delay_min": 2,
+  "delay_max": 5,
+  "retry": 3
+}

@@ -18,6 +18,7 @@ import time
 from typing import Any
 from urllib.parse import urlparse
 
+from core import ParserError, get_logger
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
@@ -202,12 +203,29 @@ def _extract_questions_js() -> str:
           return false;
         };
 
+        const isNoiseOptionText = (text) => {
+          const n = (text || '').trim().toLowerCase();
+
+          if (!n) return true;
+
+          // remove add option
+          if (n.startsWith("thêm tùy chọn")) return true;
+          if (n.startsWith("add option")) return true;
+
+          // google specific labels
+          if (n.includes('lựa chọn nhập')) return true;
+          if (n.includes('option "other"')) return true;
+
+          return false;
+        };
+
         const cleanLabel = (raw) => {
           let t = (raw || '').trim().replace(/\s+/g, ' ');
           if (!t) return '';
           if (titleNorm && t === titleNorm) return '';
           if (titleNorm && t.startsWith(titleNorm)) t = t.slice(titleNorm.length).trim();
           t = t.replace(/^[A-Z0-9][.)]\s*/, '').trim();
+          if (isNoiseOptionText(t)) return '';
           return t;
         };
 
@@ -426,13 +444,15 @@ def parse_google_form(
     ------
     ValueError
         If the URL is not a valid edit link.
-    RuntimeError
+    ParserError
         On likely login redirect or empty extraction when the page did not load as expected.
     PlaywrightTimeoutError / PlaywrightError
         On browser timeouts or Playwright failures.
     """
+    logger = get_logger("form_parser")
     url = _validate_edit_url(edit_url)
     out: list[dict[str, Any]] = []
+    logger.info("Parsing form from edit URL.")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless, slow_mo=slow_mo_ms)
@@ -451,12 +471,12 @@ def parse_google_form(
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=navigation_timeout_ms)
             except PlaywrightTimeoutError as e:
-                raise RuntimeError(
+                raise ParserError(
                     "Timed out loading the form editor. Check the URL and network access."
                 ) from e
 
             if _detect_login_redirect(page.url, page.title()):
-                raise RuntimeError(
+                raise ParserError(
                     "Redirected to Google sign-in. Open the form while logged in, or run with "
                     "headless=False and complete login in the Playwright browser window."
                 )
@@ -470,11 +490,11 @@ def parse_google_form(
             except PlaywrightTimeoutError:
                 # Form might still be loading or access denied
                 if "Sorry" in (page.content() or "") or "access" in (page.content() or "").lower():
-                    raise RuntimeError(
+                    raise ParserError(
                         "Could not access the form (permission denied or link invalid). "
                         "Ensure you can open this edit URL when signed in."
                     ) from None
-                raise RuntimeError(
+                raise ParserError(
                     "Timed out waiting for form questions to appear. "
                     "If the form loads slowly, increase navigation_timeout_ms."
                 ) from None
@@ -498,10 +518,13 @@ def parse_google_form(
                 # Text questions do not list selectable options in the same way as choice fields.
                 if canonical == "text_input":
                     opts = []
+                question_text = (row.get("question") or "").strip()
+                if not question_text:
+                    continue
 
                 out.append(
                     {
-                        "question": row.get("question") or "",
+                        "question": question_text,
                         "type": canonical,
                         "options": opts,
                     }
@@ -517,6 +540,9 @@ def parse_google_form(
                 seen.add(key)
                 deduped.append(item)
             out = deduped
+            if not out:
+                raise ParserError("No parseable questions were found on the edit page.")
+            logger.info("Parsed %s questions.", len(out))
 
         finally:
             browser.close()
@@ -570,7 +596,7 @@ def main() -> None:
     except ValueError as e:
         print(f"Invalid input: {e}", file=sys.stderr)
         sys.exit(2)
-    except RuntimeError as e:
+    except ParserError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(3)
     except (PlaywrightTimeoutError, PlaywrightError) as e:
