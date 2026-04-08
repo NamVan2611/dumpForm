@@ -28,22 +28,21 @@ _TYPE_ALIASES: tuple[tuple[str, str], ...] = (
     # English
     ("short answer", "text_input"),
     ("paragraph", "text_input"),
+    ("multiple choice grid", "radio_grid"),
+    ("checkbox grid", "checkbox_grid"),
     ("multiple choice", "radio"),
     ("checkboxes", "checkbox"),
     ("checkbox", "checkbox"),
-    ("multiple choice grid", "grid"),
-    ("checkbox grid", "grid"),
     ("dropdown", "dropdown"),
     # Vietnamese (docs.google.com forms UI)
     ("câu trả lời ngắn", "text_input"),
     ("đoạn văn", "text_input"),
     ("trắc nghiệm", "radio"),
     ("hộp kiểm", "checkbox"),
-    ("lưới trắc nghiệm", "grid"),
-    ("lưới hộp kiểm", "grid"),
-    ("lưới", "grid"),
     ("danh sách thả xuống", "dropdown"),
     ("thả xuống", "dropdown"),
+    ("lưới nhiều lựa chọn", "radio_grid"),
+    ("lưới hộp kiểm", "checkbox_grid"),
 )
 
 
@@ -86,12 +85,12 @@ def _normalize_type(google_label: str) -> str:
 
 
 def _canonical_from_hints(label: str, dom_hint: str) -> str:
-    """Prefer menu label; fall back to DOM-derived hint."""
+    """Prefer menu label; fall back to DOM-derived hint (radio/checkbox/dropdown/text_input)."""
     from_label = _normalize_type(label)
     if from_label != "unknown":
         return from_label
     hint = (dom_hint or "").strip().lower()
-    if hint in ("radio", "checkbox", "dropdown", "text_input", "grid"):
+    if hint in ("radio", "checkbox", "dropdown", "text_input", "radio_grid", "checkbox_grid"):
         return hint
     return "unknown"
 
@@ -142,10 +141,6 @@ def _extract_questions_js() -> str:
       const inferTypeFromDom = (root) => {
         const radios = root.querySelectorAll('[role="radio"]');
         const checks = root.querySelectorAll('[role="checkbox"]');
-        const radioGroups = root.querySelectorAll('[role="radiogroup"]');
-        const checkGroups = root.querySelectorAll('[role="group"]');
-        const textInputs = root.querySelectorAll('input[type="text"], textarea');
-
         const optionRadios = Array.from(radios).filter((n) => {
           const t = (n.getAttribute('aria-label') || '').toLowerCase();
           if (t.includes('add') || t.includes('thêm')) return false;
@@ -156,18 +151,8 @@ def _extract_questions_js() -> str:
           if (t.includes('add') || t.includes('thêm')) return false;
           return true;
         });
-
-        // Grid questions usually have multiple row groups.
-        if (radioGroups.length > 1 || checkGroups.length > 1) return 'grid';
-
-        // Strong signal for short-answer/paragraph style questions.
-        if (textInputs.length > 0 && optionRadios.length === 0 && optionChecks.length === 0) {
-          return 'text_input';
-        }
-
-        // Require at least 2 controls to avoid false positives from editor UI controls.
-        if (optionChecks.length >= 2) return 'checkbox';
-        if (optionRadios.length >= 2) return 'radio';
+        if (optionChecks.length >= 1) return 'checkbox';
+        if (optionRadios.length >= 1) return 'radio';
         /*
          * Do not use [role="listbox"] / combobox here: the *question type* picker
          * (Trắc nghiệm, Câu trả lời ngắn, …) uses the same roles and would label
@@ -205,6 +190,150 @@ def _extract_questions_js() -> str:
       };
 
       /**
+       * Grid questions: multiple [role=radiogroup] (radio grid) or multiple row groups of
+       * checkboxes (checkbox grid). Ignores Khác / Other / Add option / empty labels.
+       */
+      const tryExtractGrid = (root, questionTitle) => {
+        const titleNorm = (questionTitle || '').trim().replace(/\s+/g, ' ');
+        const titleEl = root.querySelector('[contenteditable="true"]');
+
+        const isGridNoise = (text) => {
+          const n = (text || '').trim().toLowerCase();
+          if (!n) return true;
+          if (n === 'khác' || n === 'other') return true;
+          if (n.startsWith('thêm tùy chọn') || n.startsWith('add option')) return true;
+          if (n.includes('lựa chọn nhập') || n.includes('option "other"')) return true;
+          return false;
+        };
+
+        const cleanGrid = (raw) => {
+          let t = (raw || '').trim().replace(/\s+/g, ' ');
+          if (!t) return '';
+          if (titleNorm && t === titleNorm) return '';
+          if (titleNorm && t.startsWith(titleNorm)) t = t.slice(titleNorm.length).trim();
+          t = t.replace(/^[A-Z0-9][.)]\s*/, '').trim();
+          if (isGridNoise(t)) return '';
+          return t;
+        };
+
+        const stripA11y = (label) => {
+          let t = (label || '').trim();
+          t = t.replace(/,\s*row\s+\d+.*$/i, '');
+          t = t.replace(/,\s*hàng\s+\d+.*$/i, '');
+          t = t.replace(/,\s*\d+\s+of\s+\d+.*$/i, '');
+          t = t.replace(/,\s*cột\s+\d+.*$/i, '');
+          return t.trim();
+        };
+
+        const isAddOptionControl = (ctrl) => {
+          if (!ctrl) return false;
+          const al = ((ctrl.getAttribute && ctrl.getAttribute('aria-label')) || '').toLowerCase();
+          if (/thêm tùy chọn|add option|add choice|add another|add or|thêm câu trả lời/i.test(al))
+            return true;
+          const tt = (ctrl.getAttribute && ctrl.getAttribute('data-tooltip')) || '';
+          if (/add option|thêm/i.test(tt)) return true;
+          return false;
+        };
+
+        const findRowLabelFor = (focusEl) => {
+          const tr = focusEl.closest && focusEl.closest('tr');
+          if (tr) {
+            const cells = tr.querySelectorAll('td, th');
+            for (const cell of cells) {
+              if (cell.contains(focusEl)) continue;
+              const tx = cleanGrid(cell.innerText || '');
+              if (tx && tx.length < 2000) return tx;
+            }
+          }
+          let el = focusEl.parentElement;
+          for (let depth = 0; depth < 14 && el && root.contains(el); depth++) {
+            const prev = el.previousElementSibling;
+            if (prev) {
+              const t = cleanGrid(prev.innerText || '');
+              if (t && t.length < 800) return t;
+            }
+            el = el.parentElement;
+          }
+          return '';
+        };
+
+        const radioGroups = Array.from(root.querySelectorAll('[role="radiogroup"]')).filter(
+          (g) => root.contains(g)
+        );
+        if (radioGroups.length >= 2) {
+          const counts = radioGroups.map((g) => g.querySelectorAll('[role="radio"]').length);
+          const n = counts[0];
+          const sameCount = n >= 1 && counts.every((c) => c === n);
+          if (sameCount) {
+            const columns = [];
+            const seenCol = new Set();
+            radioGroups[0].querySelectorAll('[role="radio"]').forEach((rad) => {
+              if (isAddOptionControl(rad)) return;
+              let lab = stripA11y(rad.getAttribute('aria-label') || '');
+              lab = cleanGrid(lab);
+              if (lab && !seenCol.has(lab)) {
+                seenCol.add(lab);
+                columns.push(lab);
+              }
+            });
+            const rows = [];
+            radioGroups.forEach((g) => {
+              let rowLabel = findRowLabelFor(g);
+              if (!rowLabel) {
+                const r0 = g.querySelector('[role="radio"]');
+                if (r0) rowLabel = findRowLabelFor(r0);
+              }
+              rows.push(cleanGrid(rowLabel));
+            });
+            if (rows.some((r) => !r)) return null;
+            if (rows.length >= 2 && columns.length >= 1) {
+              return { gridType: 'radio_grid', rows, columns };
+            }
+          }
+        }
+
+        const cbGroups = Array.from(root.querySelectorAll('[role="group"]')).filter((g) => {
+          if (!root.contains(g)) return false;
+          const cbs = g.querySelectorAll('[role="checkbox"]');
+          if (cbs.length < 2) return false;
+          return Array.from(cbs).every((c) => !isAddOptionControl(c));
+        });
+        if (cbGroups.length >= 2) {
+          const counts = cbGroups.map((g) => g.querySelectorAll('[role="checkbox"]').length);
+          const n = counts[0];
+          const sameCount = n >= 2 && counts.every((c) => c === n);
+          if (sameCount) {
+            const columns = [];
+            const seenCol = new Set();
+            cbGroups[0].querySelectorAll('[role="checkbox"]').forEach((chk) => {
+              if (isAddOptionControl(chk)) return;
+              let lab = stripA11y(chk.getAttribute('aria-label') || '');
+              lab = cleanGrid(lab);
+              if (lab && !seenCol.has(lab)) {
+                seenCol.add(lab);
+                columns.push(lab);
+              }
+            });
+            const rows = [];
+            cbGroups.forEach((g) => {
+              let rowLabel = findRowLabelFor(g);
+              if (!rowLabel) {
+                const c0 = g.querySelector('[role="checkbox"]');
+                if (c0) rowLabel = findRowLabelFor(c0);
+              }
+              rows.push(cleanGrid(rowLabel));
+            });
+            if (rows.some((r) => !r)) return null;
+            if (rows.length >= 2 && columns.length >= 1) {
+              return { gridType: 'checkbox_grid', rows, columns };
+            }
+          }
+        }
+
+        return null;
+      };
+
+      /**
        * Option labels in the editor are often NOT extra contenteditable nodes; they sit in
        * plain div/span rows next to each [role=radio] or [role=checkbox]. Walk from each
        * control to find text (contenteditable, input, dir=auto, aria-label, row innerText).
@@ -234,8 +363,7 @@ def _extract_questions_js() -> str:
           // google specific labels
           if (n.includes('lựa chọn nhập')) return true;
           if (n.includes('option "other"')) return true;
-          if (n === 'chú thích' || n === 'mô tả' || n === 'description') return true;
-          if (n === 'thêm cột' || n === 'thêm hàng' || n === 'add column' || n === 'add row') return true;
+          if (n === 'khác' || n === 'other') return true;
 
           return false;
         };
@@ -409,6 +537,20 @@ def _extract_questions_js() -> str:
         const typeRaw = collectTypeLabel(root);
         const domHint = inferTypeFromDom(root);
 
+        const grid = tryExtractGrid(root, title);
+        if (grid) {
+          results.push({
+            question: title || '',
+            typeLabel: typeRaw || '',
+            domHint: grid.gridType,
+            options: [],
+            rows: grid.rows,
+            columns: grid.columns,
+            gridType: grid.gridType,
+          });
+          continue;
+        }
+
         const options = [];
         for (let i = 1; i < editables.length; i++) {
           dedupePush(options, editables[i].innerText);
@@ -460,6 +602,8 @@ def parse_google_form(
     Returns
     -------
     list of dicts with keys: ``question``, ``type``, ``options``.
+    Grid questions add ``rows`` and ``columns`` (string lists) and use
+    ``type`` ``radio_grid`` or ``checkbox_grid``.
 
     Raises
     ------
@@ -535,27 +679,46 @@ def parse_google_form(
                 label = row.get("typeLabel") or ""
                 dom_hint = row.get("domHint") or ""
                 canonical = _canonical_from_hints(label, dom_hint)
+                if row.get("gridType") in ("radio_grid", "checkbox_grid"):
+                    canonical = str(row["gridType"])
+                elif canonical in ("radio_grid", "checkbox_grid"):
+                    rows_g = row.get("rows") or []
+                    cols_g = row.get("columns") or []
+                    if not rows_g or not cols_g:
+                        canonical = "radio" if canonical == "radio_grid" else "checkbox"
                 opts = row.get("options") or []
                 # Text questions do not list selectable options in the same way as choice fields.
-                if canonical in {"text_input", "grid"}:
+                if canonical == "text_input":
+                    opts = []
+                if canonical in ("radio_grid", "checkbox_grid"):
                     opts = []
                 question_text = (row.get("question") or "").strip()
                 if not question_text:
                     continue
 
-                out.append(
-                    {
-                        "question": question_text,
-                        "type": canonical,
-                        "options": opts,
-                    }
-                )
+                item: dict[str, Any] = {
+                    "question": question_text,
+                    "type": canonical,
+                    "options": opts,
+                }
+                if canonical in ("radio_grid", "checkbox_grid"):
+                    item["rows"] = list(row.get("rows") or [])
+                    item["columns"] = list(row.get("columns") or [])
+                out.append(item)
 
             # De-duplicate consecutive identical questions (rare duplicate nodes)
             deduped: list[dict[str, Any]] = []
             seen = set()
             for item in out:
-                key = (item["question"], item["type"], tuple(item["options"]))
+                if item["type"] in ("radio_grid", "checkbox_grid"):
+                    key = (
+                        item["question"],
+                        item["type"],
+                        tuple(item.get("rows") or []),
+                        tuple(item.get("columns") or []),
+                    )
+                else:
+                    key = (item["question"], item["type"], tuple(item["options"]))
                 if key in seen:
                     continue
                 seen.add(key)

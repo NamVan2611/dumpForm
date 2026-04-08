@@ -126,7 +126,18 @@ def _auto_suggest_ratios(questions: list[dict[str, Any]]) -> dict[str, dict[str,
         q_text = q.get("question", "")
         q_type = q.get("type", "")
         options = q.get("options") or []
-        if q_type in {"radio", "checkbox"} and options:
+        rows = q.get("rows") or []
+        columns = q.get("columns") or []
+        if q_type in {"radio_grid", "checkbox_grid"} and rows and columns:
+            specs.append(
+                {
+                    "question": q_text,
+                    "type": q_type,
+                    "rows": list(rows),
+                    "columns": list(columns),
+                }
+            )
+        elif q_type in {"radio", "checkbox"} and options:
             specs.append({"question": q_text, "type": q_type, "options": options})
 
     suggester = AutoSuggest()
@@ -153,12 +164,42 @@ def _build_submission_plan(
     # Pre-calculate exact answer arrays for ratio questions.
     distributed: dict[str, list[Any]] = {}
     for q_text, meta in ratio_config.items():
-        distributed[q_text] = manager.build_distribution(
-            meta["type"],
-            submission_count,
-            meta["ratio"],
-            shuffle=True,
-        )
+        q_type = meta.get("type", "")
+        if q_type == "radio_grid":
+            row_order = next(
+                (q.get("rows") for q in questions if q.get("question") == q_text),
+                None,
+            )
+            nested = meta.get("rows") or {}
+            if not isinstance(nested, dict):
+                continue
+            distributed[q_text] = manager.build_radio_grid_distribution(
+                submission_count,
+                nested,
+                row_order=list(row_order) if row_order else list(nested.keys()),
+                shuffle=True,
+            )
+        elif q_type == "checkbox_grid":
+            row_order = next(
+                (q.get("rows") for q in questions if q.get("question") == q_text),
+                None,
+            )
+            nested = meta.get("rows") or {}
+            if not isinstance(nested, dict):
+                continue
+            distributed[q_text] = manager.build_checkbox_grid_distribution(
+                submission_count,
+                nested,
+                row_order=list(row_order) if row_order else list(nested.keys()),
+                shuffle=True,
+            )
+        else:
+            distributed[q_text] = manager.build_distribution(
+                q_type,
+                submission_count,
+                meta["ratio"],
+                shuffle=True,
+            )
 
     for q in questions:
         q_text = q.get("question", "")
@@ -233,7 +274,16 @@ def main() -> None:
             print("\nAuto-suggest ratio config:")
             for q_text, meta in ratio_config.items():
                 print(f"- {q_text}")
-                print(f"  type={meta['type']}, ratio={meta['ratio']}")
+                mt = meta.get("type", "")
+                if mt in ("radio_grid", "checkbox_grid"):
+                    print(f"  type={mt}")
+                    rows_payload = meta.get("rows") or {}
+                    if isinstance(rows_payload, dict):
+                        for row_name, rdict in rows_payload.items():
+                            print(f"  - {row_name}")
+                            print(f"    ratio={rdict}")
+                else:
+                    print(f"  type={mt}, ratio={meta.get('ratio')}")
 
         # Build exact plan for all submissions.
         plan_started = time.time()
@@ -267,7 +317,11 @@ def main() -> None:
             print("\nPlanned distribution snapshot:")
             for q_text, meta in ratio_config.items():
                 q_type = meta["type"]
-                if q_type == "radio":
+                if q_type in ("radio_grid", "checkbox_grid"):
+                    values = [p.get(q_text) for p in plan]
+                    print(f"- {q_text}")
+                    print(f"  type={q_type}, sample_answers(first3)={values[:3]}")
+                elif q_type == "radio":
                     values = [p.get(q_text) for p in plan]
                     counts = Counter(values)
                     print(f"- {q_text}")

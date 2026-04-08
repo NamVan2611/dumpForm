@@ -96,6 +96,10 @@ class RatioManager:
             # Checkbox can exceed 100%; no upper bound here.
             if total < 0:
                 raise RatioValidationError("Checkbox ratio total must be non-negative.")
+        elif q_type in ("radio_grid", "checkbox_grid"):
+            raise RatioValidationError(
+                f"Use validate_*_grid_config / build_*_grid_distribution for '{q_type}', not validate_ratio_config."
+            )
         else:
             raise RatioValidationError(
                 f"Unsupported question_type '{question_type}'. Use 'radio' or 'checkbox'."
@@ -253,6 +257,98 @@ class RatioManager:
         self._assert_checkbox_accuracy(selections, options, per_option_counts)
         self._logger.info("Built checkbox distribution for %s submissions.", total_submissions)
         return selections
+
+    def validate_radio_grid_config(self, rows_ratios: dict[str, dict[str, float]]) -> None:
+        """Each row must be a valid radio ratio dict (sums to 100)."""
+        if not isinstance(rows_ratios, dict) or not rows_ratios:
+            raise RatioValidationError("radio_grid config must be a non-empty dict of {row: {col: pct}}.")
+        for row, sub in rows_ratios.items():
+            if not isinstance(row, str) or not row.strip():
+                raise RatioValidationError("radio_grid row keys must be non-empty strings.")
+            if not isinstance(sub, dict) or not sub:
+                raise RatioValidationError(f"radio_grid row '{row}' must have a non-empty ratio dict.")
+            self.validate_ratio_config("radio", sub)
+
+    def validate_checkbox_grid_config(self, rows_ratios: dict[str, dict[str, float]]) -> None:
+        """Each row must be a valid checkbox ratio dict."""
+        if not isinstance(rows_ratios, dict) or not rows_ratios:
+            raise RatioValidationError("checkbox_grid config must be a non-empty dict of {row: {col: pct}}.")
+        for row, sub in rows_ratios.items():
+            if not isinstance(row, str) or not row.strip():
+                raise RatioValidationError("checkbox_grid row keys must be non-empty strings.")
+            if not isinstance(sub, dict) or not sub:
+                raise RatioValidationError(f"checkbox_grid row '{row}' must have a non-empty ratio dict.")
+            self.validate_ratio_config("checkbox", sub)
+
+    def build_radio_grid_distribution(
+        self,
+        total_submissions: int,
+        rows_ratios: dict[str, dict[str, float]],
+        *,
+        row_order: list[str] | None = None,
+        shuffle: bool = True,
+    ) -> list[dict[str, str]]:
+        """
+        One radio pick per grid row per submission. Row marginals follow each row's ratio dict.
+        """
+        if total_submissions <= 0:
+            raise RatioValidationError("total_submissions must be > 0.")
+        self.validate_radio_grid_config(rows_ratios)
+        order = row_order if row_order is not None else list(rows_ratios.keys())
+        missing = [r for r in order if r not in rows_ratios]
+        if missing:
+            raise RatioValidationError(f"row_order contains rows not in config: {missing}.")
+
+        per_row: dict[str, list[str]] = {}
+        for row in order:
+            per_row[row] = self.build_radio_distribution(
+                total_submissions,
+                rows_ratios[row],
+                shuffle=False,
+            )
+
+        out: list[dict[str, str]] = []
+        for i in range(total_submissions):
+            out.append({row: per_row[row][i] for row in order})
+        if shuffle:
+            self._rng.shuffle(out)
+        self._logger.info("Built radio_grid distribution for %s submissions.", total_submissions)
+        return out
+
+    def build_checkbox_grid_distribution(
+        self,
+        total_submissions: int,
+        rows_ratios: dict[str, dict[str, float]],
+        *,
+        row_order: list[str] | None = None,
+        shuffle: bool = True,
+        checkbox_allow_empty: bool = True,
+    ) -> list[dict[str, list[str]]]:
+        """Per-row checkbox selections; same as independent checkbox questions per row."""
+        if total_submissions <= 0:
+            raise RatioValidationError("total_submissions must be > 0.")
+        self.validate_checkbox_grid_config(rows_ratios)
+        order = row_order if row_order is not None else list(rows_ratios.keys())
+        missing = [r for r in order if r not in rows_ratios]
+        if missing:
+            raise RatioValidationError(f"row_order contains rows not in config: {missing}.")
+
+        per_row: dict[str, list[list[str]]] = {}
+        for row in order:
+            per_row[row] = self.build_checkbox_distribution(
+                total_submissions,
+                rows_ratios[row],
+                allow_empty=checkbox_allow_empty,
+                shuffle=False,
+            )
+
+        out: list[dict[str, list[str]]] = []
+        for i in range(total_submissions):
+            out.append({row: per_row[row][i] for row in order})
+        if shuffle:
+            self._rng.shuffle(out)
+        self._logger.info("Built checkbox_grid distribution for %s submissions.", total_submissions)
+        return out
 
     def build_distribution(
         self,

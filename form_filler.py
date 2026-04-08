@@ -77,6 +77,82 @@ class GoogleFormFiller:
         return " ".join((s or "").strip().lower().split())
 
     @staticmethod
+    def _strip_choice_aria(aria: str) -> str:
+        """Column/option label from aria-label (strip trailing ', row N of M', etc.)."""
+        a = (aria or "").strip()
+        if "," in a:
+            a = a.split(",")[0].strip()
+        return a
+
+    @staticmethod
+    def _is_radio_grid_answer_map(spec: Any) -> bool:
+        if not isinstance(spec, dict) or not spec:
+            return False
+        if "distribution" in spec or "choices" in spec or "answer" in spec:
+            return False
+        return all(isinstance(k, str) and isinstance(v, str) for k, v in spec.items())
+
+    @staticmethod
+    def _is_checkbox_grid_answer_map(spec: Any) -> bool:
+        if not isinstance(spec, dict) or not spec:
+            return False
+        if "distribution" in spec or "choices" in spec:
+            return False
+        return all(isinstance(k, str) and isinstance(v, list) for k, v in spec.items())
+
+    def _fill_radio_grid(self, q: Any, answer_map: dict[str, str]) -> None:
+        """One radiogroup per row; pick radio whose column label matches answer_map[row] by row order."""
+        groups = q.locator('[role="radiogroup"]')
+        row_keys = list(answer_map.keys())
+        for gi in range(groups.count()):
+            g = groups.nth(gi)
+            col_pick: str | None = None
+            if gi < len(row_keys):
+                col_pick = answer_map.get(row_keys[gi])
+            elif row_keys:
+                col_pick = answer_map.get(row_keys[-1])
+            radios = g.locator("[role='radio']")
+            clicked = False
+            if col_pick:
+                for ri in range(radios.count()):
+                    rad = radios.nth(ri)
+                    aria = self._strip_choice_aria((rad.get_attribute("aria-label") or "").strip())
+                    if self._normalize(aria) == self._normalize(col_pick):
+                        rad.click()
+                        clicked = True
+                        self._sleep_random()
+                        break
+            if not clicked and radios.count() > 0:
+                radios.first.click()
+                self._sleep_random()
+
+    def _fill_checkbox_grid(self, q: Any, answer_map: dict[str, list[str]]) -> None:
+        """Each row: [role=group] with one checkbox per column; targets matched by aria label."""
+        row_keys = list(answer_map.keys())
+        groups = q.locator('[role="group"]')
+        row_idx = 0
+        for gi in range(groups.count()):
+            g = groups.nth(gi)
+            nchk = g.locator("[role='checkbox']").count()
+            if nchk < 2:
+                continue
+            if row_idx >= len(row_keys):
+                break
+            targets = [str(t) for t in (answer_map.get(row_keys[row_idx]) or [])]
+            row_idx += 1
+            for ci in range(nchk):
+                chk = g.locator("[role='checkbox']").nth(ci)
+                aria = self._strip_choice_aria((chk.get_attribute("aria-label") or "").strip())
+                if not targets:
+                    if ci == 0:
+                        chk.click()
+                        self._sleep_random()
+                    continue
+                if any(self._normalize(aria) == self._normalize(t) for t in targets):
+                    chk.click()
+                    self._sleep_random()
+
+    @staticmethod
     def _answers_to_map(answers_data: Any) -> dict[str, Any]:
         """
         Convert supported answer formats to {question_text: answer_spec}.
@@ -216,6 +292,21 @@ class GoogleFormFiller:
                 text_input.fill(self._pick_text_value(title, answer_spec, fake_data))
                 self._sleep_random()
                 continue
+
+            radio_groups = q.locator("[role='radiogroup']")
+            if radio_groups.count() >= 2 and self._is_radio_grid_answer_map(answer_spec):
+                self._fill_radio_grid(q, answer_map=answer_spec)
+                continue
+
+            if isinstance(answer_spec, dict) and self._is_checkbox_grid_answer_map(answer_spec):
+                cb_row_groups = 0
+                grp = q.locator('[role="group"]')
+                for j in range(grp.count()):
+                    if grp.nth(j).locator("[role='checkbox']").count() >= 2:
+                        cb_row_groups += 1
+                if cb_row_groups >= 2:
+                    self._fill_checkbox_grid(q, answer_map=answer_spec)
+                    continue
 
             radios = q.locator("[role='radio']")
             if radios.count() > 0:

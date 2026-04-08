@@ -13,7 +13,7 @@ Goals:
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 import os
 import google.generativeai as genai
@@ -27,8 +27,10 @@ class QuestionSpec:
     """Input model for one question."""
 
     question: str
-    qtype: str  # expected: "radio" or "checkbox"
-    options: list[str]
+    qtype: str
+    options: list[str] = field(default_factory=list)
+    rows: list[str] = field(default_factory=list)
+    columns: list[str] = field(default_factory=list)
 
 
 class AutoSuggestError(ValueError):
@@ -50,7 +52,7 @@ class AutoSuggest:
             "checkboxes": "checkbox",
             "text": "paragraph",
             "short_answer": "paragraph",
-            "paragraph": "paragraph"
+            "paragraph": "paragraph",
         }
         return aliases.get(raw, raw)
 
@@ -58,9 +60,21 @@ class AutoSuggest:
         if not spec.question.strip():
             raise AutoSuggestError("question must be non-empty.")
         qtype = self._normalize_qtype(spec.qtype)
-        if qtype not in {"radio", "checkbox", "paragraph"}:
+        if qtype not in {"radio", "checkbox", "paragraph", "radio_grid", "checkbox_grid"}:
             raise AutoSuggestError(f"Unsupported qtype '{spec.qtype}' for question '{spec.question}'.")
         if qtype == "paragraph":
+            return
+        if qtype in ("radio_grid", "checkbox_grid"):
+            if not spec.rows or not spec.columns:
+                raise AutoSuggestError(
+                    f"Grid question '{spec.question}' must have non-empty rows and columns."
+                )
+            for row in spec.rows:
+                if not isinstance(row, str) or not row.strip():
+                    raise AutoSuggestError(f"Question '{spec.question}' has invalid row label.")
+            for col in spec.columns:
+                if not isinstance(col, str) or not col.strip():
+                    raise AutoSuggestError(f"Question '{spec.question}' has invalid column label.")
             return
         if not spec.options:
             raise AutoSuggestError(
@@ -185,6 +199,26 @@ class AutoSuggest:
                 "answer": text,
             }
 
+        elif qtype == "radio_grid":
+            nested: dict[str, dict[str, int]] = {}
+            for row in spec.rows:
+                nested[row] = self.suggest_radio_ratios(spec.columns)
+            return {
+                "question": spec.question,
+                "type": "radio_grid",
+                "rows": nested,
+            }
+
+        elif qtype == "checkbox_grid":
+            nested_cb: dict[str, dict[str, int]] = {}
+            for row in spec.rows:
+                nested_cb[row] = self.suggest_checkbox_ratios(spec.columns)
+            return {
+                "question": spec.question,
+                "type": "checkbox_grid",
+                "rows": nested_cb,
+            }
+
         elif qtype == "radio":
             ratio = self.suggest_radio_ratios(spec.options)
 
@@ -242,6 +276,8 @@ class AutoSuggest:
                     question=str(item.get("question", "")),
                     qtype=str(item.get("type", "")),
                     options=list(item.get("options", [])),
+                    rows=list(item.get("rows", [])),
+                    columns=list(item.get("columns", [])),
                 )
             else:
                 raise AutoSuggestError("Each question must be a dict or QuestionSpec.")
@@ -251,6 +287,11 @@ class AutoSuggest:
                 output[generated["question"]] = {
                     "type": "paragraph",
                     "answer": generated["answer"],
+                }
+            elif generated["type"] in ("radio_grid", "checkbox_grid"):
+                output[generated["question"]] = {
+                    "type": generated["type"],
+                    "rows": generated["rows"],
                 }
             else:
                 output[generated["question"]] = {
