@@ -15,7 +15,12 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 from typing import Any
+import os
+import google.generativeai as genai
 
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 @dataclass(frozen=True)
 class QuestionSpec:
@@ -43,6 +48,9 @@ class AutoSuggest:
             "multiple_choice": "radio",
             "single_choice": "radio",
             "checkboxes": "checkbox",
+            "text": "paragraph",
+            "short_answer": "paragraph",
+            "paragraph": "paragraph"
         }
         return aliases.get(raw, raw)
 
@@ -50,8 +58,12 @@ class AutoSuggest:
         if not spec.question.strip():
             raise AutoSuggestError("question must be non-empty.")
         qtype = self._normalize_qtype(spec.qtype)
-        if qtype not in {"radio", "checkbox"}:
+        if not spec.options:
+            return
+        if qtype not in {"radio", "checkbox", "paragraph"}:
             raise AutoSuggestError(f"Unsupported qtype '{spec.qtype}' for question '{spec.question}'.")
+        if qtype == "paragraph":
+            return
         if not spec.options or len(spec.options) < 2:
             raise AutoSuggestError(
                 f"Question '{spec.question}' must have at least 2 options."
@@ -59,6 +71,7 @@ class AutoSuggest:
         for opt in spec.options:
             if not isinstance(opt, str) or not opt.strip():
                 raise AutoSuggestError(f"Question '{spec.question}' has invalid option value.")
+        
 
     def _weights_to_percent(self, weights: list[float]) -> list[int]:
         """
@@ -158,20 +171,46 @@ class AutoSuggest:
 
         return {opt: pct for opt, pct in zip(options, ints)}
 
-    def suggest_for_question(self, spec: QuestionSpec) -> dict[str, Any]:
-        """Generate ratio config for one question spec."""
+    def suggest_for_question(self, spec: QuestionSpec):
         self._validate_spec(spec)
         qtype = self._normalize_qtype(spec.qtype)
-        if qtype == "radio":
+
+        if qtype == "paragraph":
+            text = self.suggest_paragraph_ai(spec.question)
+            return {
+                "question": spec.question,
+                "type": "paragraph",
+                "answer": text,
+            }
+
+        elif qtype == "radio":
             ratio = self.suggest_radio_ratios(spec.options)
+
         else:
             ratio = self.suggest_checkbox_ratios(spec.options)
+
         return {
             "question": spec.question,
             "type": qtype,
             "ratio": ratio,
         }
+            
+    def suggest_paragraph_ai(self, question: str) -> str:
+        try:
+            prompt = f"""
+                Bạn là người trả lời khảo sát.
+                Hãy trả lời ngắn gọn 1-2 câu tiếng Việt.
+                Câu hỏi: {question}
+                """
 
+            response = model.generate_content(prompt)
+
+            text = response.text.strip()
+            return text
+
+        except Exception:
+            return "Tôi không có ý kiến cụ thể, nhưng nhìn chung mọi thứ đều ổn."
+    
     def suggest_many(self, questions: list[dict[str, Any] | QuestionSpec]) -> dict[str, dict[str, Any]]:
         """
         Generate ratio configs for many questions.
@@ -206,10 +245,16 @@ class AutoSuggest:
                 raise AutoSuggestError("Each question must be a dict or QuestionSpec.")
 
             generated = self.suggest_for_question(spec)
-            output[generated["question"]] = {
-                "type": generated["type"],
-                "ratio": generated["ratio"],
-            }
+            if generated["type"] == "paragraph":
+                output[generated["question"]] = {
+                    "type": "paragraph",
+                    "answer": generated["answer"],
+                }
+            else:
+                output[generated["question"]] = {
+                    "type": generated["type"],
+                    "ratio": generated["ratio"],
+                }
         return output
 
 
