@@ -31,12 +31,17 @@ _TYPE_ALIASES: tuple[tuple[str, str], ...] = (
     ("multiple choice", "radio"),
     ("checkboxes", "checkbox"),
     ("checkbox", "checkbox"),
+    ("multiple choice grid", "grid"),
+    ("checkbox grid", "grid"),
     ("dropdown", "dropdown"),
     # Vietnamese (docs.google.com forms UI)
     ("câu trả lời ngắn", "text_input"),
     ("đoạn văn", "text_input"),
     ("trắc nghiệm", "radio"),
     ("hộp kiểm", "checkbox"),
+    ("lưới trắc nghiệm", "grid"),
+    ("lưới hộp kiểm", "grid"),
+    ("lưới", "grid"),
     ("danh sách thả xuống", "dropdown"),
     ("thả xuống", "dropdown"),
 )
@@ -81,12 +86,12 @@ def _normalize_type(google_label: str) -> str:
 
 
 def _canonical_from_hints(label: str, dom_hint: str) -> str:
-    """Prefer menu label; fall back to DOM-derived hint (radio/checkbox/dropdown/text_input)."""
+    """Prefer menu label; fall back to DOM-derived hint."""
     from_label = _normalize_type(label)
     if from_label != "unknown":
         return from_label
     hint = (dom_hint or "").strip().lower()
-    if hint in ("radio", "checkbox", "dropdown", "text_input"):
+    if hint in ("radio", "checkbox", "dropdown", "text_input", "grid"):
         return hint
     return "unknown"
 
@@ -137,6 +142,10 @@ def _extract_questions_js() -> str:
       const inferTypeFromDom = (root) => {
         const radios = root.querySelectorAll('[role="radio"]');
         const checks = root.querySelectorAll('[role="checkbox"]');
+        const radioGroups = root.querySelectorAll('[role="radiogroup"]');
+        const checkGroups = root.querySelectorAll('[role="group"]');
+        const textInputs = root.querySelectorAll('input[type="text"], textarea');
+
         const optionRadios = Array.from(radios).filter((n) => {
           const t = (n.getAttribute('aria-label') || '').toLowerCase();
           if (t.includes('add') || t.includes('thêm')) return false;
@@ -147,8 +156,18 @@ def _extract_questions_js() -> str:
           if (t.includes('add') || t.includes('thêm')) return false;
           return true;
         });
-        if (optionChecks.length >= 1) return 'checkbox';
-        if (optionRadios.length >= 1) return 'radio';
+
+        // Grid questions usually have multiple row groups.
+        if (radioGroups.length > 1 || checkGroups.length > 1) return 'grid';
+
+        // Strong signal for short-answer/paragraph style questions.
+        if (textInputs.length > 0 && optionRadios.length === 0 && optionChecks.length === 0) {
+          return 'text_input';
+        }
+
+        // Require at least 2 controls to avoid false positives from editor UI controls.
+        if (optionChecks.length >= 2) return 'checkbox';
+        if (optionRadios.length >= 2) return 'radio';
         /*
          * Do not use [role="listbox"] / combobox here: the *question type* picker
          * (Trắc nghiệm, Câu trả lời ngắn, …) uses the same roles and would label
@@ -215,6 +234,8 @@ def _extract_questions_js() -> str:
           // google specific labels
           if (n.includes('lựa chọn nhập')) return true;
           if (n.includes('option "other"')) return true;
+          if (n === 'chú thích' || n === 'mô tả' || n === 'description') return true;
+          if (n === 'thêm cột' || n === 'thêm hàng' || n === 'add column' || n === 'add row') return true;
 
           return false;
         };
@@ -516,7 +537,7 @@ def parse_google_form(
                 canonical = _canonical_from_hints(label, dom_hint)
                 opts = row.get("options") or []
                 # Text questions do not list selectable options in the same way as choice fields.
-                if canonical == "text_input":
+                if canonical in {"text_input", "grid"}:
                     opts = []
                 question_text = (row.get("question") or "").strip()
                 if not question_text:

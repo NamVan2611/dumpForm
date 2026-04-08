@@ -58,15 +58,13 @@ class AutoSuggest:
         if not spec.question.strip():
             raise AutoSuggestError("question must be non-empty.")
         qtype = self._normalize_qtype(spec.qtype)
-        if not spec.options:
-            return
         if qtype not in {"radio", "checkbox", "paragraph"}:
             raise AutoSuggestError(f"Unsupported qtype '{spec.qtype}' for question '{spec.question}'.")
         if qtype == "paragraph":
             return
-        if not spec.options or len(spec.options) < 2:
+        if not spec.options:
             raise AutoSuggestError(
-                f"Question '{spec.question}' must have at least 2 options."
+                f"Question '{spec.question}' must have at least 1 option."
             )
         for opt in spec.options:
             if not isinstance(opt, str) or not opt.strip():
@@ -100,8 +98,10 @@ class AutoSuggest:
         - Convert to exact integer percentages
         - Shuffle naturally by random sampling
         """
-        if len(options) < 2:
-            raise AutoSuggestError("Radio question needs at least 2 options.")
+        if not options:
+            raise AutoSuggestError("Radio question needs at least 1 option.")
+        if len(options) == 1:
+            return {options[0]: 100}
 
         # Slightly biased realistic spread (not too extreme most of the time).
         weights = [self._rng.uniform(0.6, 1.8) for _ in options]
@@ -123,8 +123,10 @@ class AutoSuggest:
         - We estimate an average selected-option count and distribute it across options.
         """
         n = len(options)
-        if n < 2:
-            raise AutoSuggestError("Checkbox question needs at least 2 options.")
+        if n < 1:
+            raise AutoSuggestError("Checkbox question needs at least 1 option.")
+        if n == 1:
+            return {options[0]: 100}
         if min_select_avg <= 0 or max_select_avg <= 0 or min_select_avg > max_select_avg:
             raise AutoSuggestError("Invalid checkbox average selection bounds.")
 
